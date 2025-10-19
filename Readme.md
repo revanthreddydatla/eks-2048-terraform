@@ -43,6 +43,7 @@ This guide automates the deployment of the 2048 game on AWS EKS using Terraform 
    aws s3 ls  # Test AWS CLI access
 
 2. Deploy Infrastructure
+   
    ⚠️ Make sure you are in the terraform folder
    
    terraform apply
@@ -54,6 +55,7 @@ This guide automates the deployment of the 2048 game on AWS EKS using Terraform 
    kubectl get svc -n kube-system
 
 6. Deploy the 2048 App
+   
    ⚠️ Make sure you are in the kubernetes_definition_files folder
 
    ⚠️ Don't forget to update the IAM account ID in the ServiceAccount annotation
