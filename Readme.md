@@ -44,23 +44,28 @@ This guide automates the deployment of the 2048 game on AWS EKS using Terraform 
 
 2. Deploy Infrastructure
    ⚠️ Make sure you are in the terraform folder
+   
    terraform apply
 
-3. Update kubeconfig
+4. Update kubeconfig
    aws eks update-kubeconfig --name game-2048
 
-4. Verify Cluster Access
+5. Verify Cluster Access
    kubectl get svc -n kube-system
 
-5. Deploy the 2048 App
+6. Deploy the 2048 App
    ⚠️ Make sure you are in the kubernetes_definition_files folder
-   kubectl apply -f game_2048.yaml
-   ⚠️ Don't forget to update the IAM account ID in the ServiceAccount annotation
 
-6. Restart CoreDNS
+   ⚠️ Don't forget to update the IAM account ID in the ServiceAccount annotation
+   
+   kubectl apply -f game_2048.yaml
+   
+   
+
+8. Restart CoreDNS
    kubectl rollout restart deployment coredns -n kube-system
 
-7. Install AWS Load Balancer Controller
+9. Install AWS Load Balancer Controller
    helm repo add eks https://aws.github.io/eks-charts
    helm repo update
 
@@ -72,12 +77,12 @@ This guide automates the deployment of the 2048 game on AWS EKS using Terraform 
      --set region=<AWS_REGION> \
      --set vpcId=<VPC_ID>
 
-8. Check Ingress and Logs
+10. Check Ingress and Logs
    kubectl get ingress ingress-2048 -n game-2048
    kubectl get deployment aws-load-balancer-controller -n kube-system
    kubectl logs deployment/aws-load-balancer-controller -n kube-system
 
-9. Restart CoreDNS (if needed)
+11. Restart CoreDNS (if needed)
    kubectl rollout restart deployment coredns -n kube-system
 
 🧹 Cleanup Instructions
