@@ -1,0 +1,314 @@
+
+locals {
+  kubernetes_namespace = "game-2048"
+  aws_load_balancer_controller_service_account_name = "aws_load_balancer_controller_service_account"
+  first_subnet_id = tolist(data.aws_subnets.default_vpc_subnets.ids)[0]
+}
+
+data "aws_caller_identity" "current" {}
+
+# -----------Retrieve vpc and subnet data
+data "aws_vpc" "default" {
+    default = true
+}
+
+data "aws_subnets" "default_vpc_subnets" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
+}
+
+data "aws_subnet" "default_vpc_subnet" {
+  for_each = toset(data.aws_subnets.default_vpc_subnets.ids)
+  id       = each.value
+}
+
+
+# ------------Create cluster config
+
+resource "aws_eks_cluster" "game_2048" {
+  name = "game-2048"
+
+  access_config {
+    authentication_mode = "API"
+  }
+
+  role_arn = aws_iam_role.cluster.arn
+  version  = "1.31"
+
+  vpc_config {
+    subnet_ids = [for s in data.aws_subnet.default_vpc_subnet : s.id if s.availability_zone != "us-east-1e"]
+    # subnet_ids = [for s in data.aws_subnet.default_vpc_subnet : if s.avai]
+  }
+
+  # Ensure that IAM Role permissions are created before and deleted
+  # after EKS Cluster handling. Otherwise, EKS will not be able to
+  # properly delete EKS managed EC2 infrastructure such as Security Groups.
+  depends_on = [
+    aws_iam_role_policy_attachment.cluster_AmazonEKSClusterPolicy,
+  ]
+}
+
+
+
+# ------------IAM role for eks cluster to access aws
+resource "aws_iam_role" "cluster" {
+  name = "eks-cluster-example"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "sts:AssumeRole",
+          "sts:TagSession"
+        ]
+        Effect = "Allow"
+        Principal = {
+          Service = "eks.amazonaws.com"
+        }
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "cluster_AmazonEKSClusterPolicy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+  role       = aws_iam_role.cluster.name
+}
+
+output "oidc_provider_url" {
+  value = aws_eks_cluster.game_2048.identity[0].oidc[0].issuer
+}
+
+
+output "caller" {
+  value = data.aws_caller_identity.current
+}
+
+
+# Create the IAM OIDC provider
+resource "aws_iam_openid_connect_provider" "eks" {
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = [data.tls_certificate.oidc_thumbprint.certificates[0].sha1_fingerprint]
+  url             = aws_eks_cluster.game_2048.identity[0].oidc[0].issuer
+  depends_on = [
+    aws_eks_cluster.game_2048
+  ]
+}
+
+# Get the TLS certificate for the OIDC provider
+data "tls_certificate" "oidc_thumbprint" {
+  url = aws_eks_cluster.game_2048.identity[0].oidc[0].issuer
+  depends_on = [
+    aws_eks_cluster.game_2048
+  ]
+}
+
+
+# ------------------role for lb controller(which manages ingress)
+# create iam role for lb controller to create lb resources and congiring routes in aws
+# create policy json data from github url, create policy out of it and add it to alb_controller_role
+
+data "http" "aws_lb_controller_policy" {
+  url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json"
+}
+
+resource "aws_iam_policy" "aws_lb_controller_policy" {
+  name        = "AWSLoadBalancerControllerIAMPolicy"
+  path        = "/"
+  description = "policy to allow aws load balancer controller to interact with relevant AWS services"
+  policy = data.http.aws_lb_controller_policy.response_body
+}
+
+resource "aws_iam_role" "alb_controller_role" {
+  name = "AmazonEKSLoadBalancerControllerRole"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Federated = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/${replace(aws_eks_cluster.game_2048.identity[0].oidc[0].issuer, "https://", "")}"
+          
+        }
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringEquals = {
+            # "${aws_eks_cluster.game_2048.identity[0].oidc[0].issuer}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"
+            "${replace(aws_eks_cluster.game_2048.identity[0].oidc[0].issuer, "https://", "")}:sub" : "system:serviceaccount:kube-system:aws-load-balancer-controller"
+          }
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "alb_controller_role_to_policy" {
+  role      = aws_iam_role.alb_controller_role.name
+  policy_arn = aws_iam_policy.aws_lb_controller_policy.arn
+}
+
+
+# -----------------access entry creation in eks for iam user to authentitate to cluster api server
+# create access entry and associate access policy for current user to have access to eks game-2048 cluster
+
+resource "aws_eks_access_entry" "cloud_user" {
+  cluster_name      = aws_eks_cluster.game_2048.name
+  principal_arn     = data.aws_caller_identity.current.arn
+  type              = "STANDARD"
+  depends_on = [
+    aws_eks_cluster.game_2048
+  ]
+}
+
+resource "aws_eks_access_policy_association" "cloud_user" {
+  cluster_name  = aws_eks_cluster.game_2048.name
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+  principal_arn = data.aws_caller_identity.current.arn
+
+  access_scope {
+    type       = "cluster"
+  }
+  depends_on = [
+    aws_eks_cluster.game_2048,aws_eks_access_entry.cloud_user
+  ]
+}
+
+
+# -----------create a namespace, it will be done in the yaml definition file
+ 
+# -----------PROCESS: creating fargate profile 
+#            https://docs.aws.amazon.com/eks/latest/userguide/pod-execution-role.html
+# -----------create role for eks components to create pods in fargate
+resource "aws_iam_role" "AmazonEKSFargatePodExecutionRole" {
+  name = "AmazonEKSFargatePodExecutionRole"
+
+  assume_role_policy = jsonencode({
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "eks-fargate-pods.amazonaws.com"
+      }
+    }]
+    Version = "2012-10-17"
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "AmazonEKSFargatePodExecutionRolePolicy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSFargatePodExecutionRolePolicy"
+  role       = aws_iam_role.AmazonEKSFargatePodExecutionRole.name
+}
+# -----------fargate requires Private subnets, as we are using default vpc lets create two private subnets in the vpc  priv-subnet-01 with az,priv-subnet-02
+#            as priv subnet required 1.create seperate route table, 2. associate route table with subnet 
+#            [NOTE:(from fargate profile creation console)Specify the subnets in your VPC where your pods will run. Only private subnets are supported.]
+resource "aws_route_table" "default_vpc_rt_for_priv_subnets" {
+  vpc_id = data.aws_vpc.default.id
+
+  # since this is exactly the route AWS will create, the route will be adopted
+  route {
+    cidr_block = data.aws_vpc.default.cidr_block
+    gateway_id = "local"
+  }
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_nat_gateway.nat_gw01.id
+  }
+}
+resource "aws_subnet" "priv_subnet_01" {
+  vpc_id     = data.aws_vpc.default.id
+  cidr_block = "172.31.96.0/20"
+
+  tags = {
+    Name = "priv-subnet-01"
+  }
+}
+resource "aws_subnet" "priv_subnet_02" {
+  vpc_id     = data.aws_vpc.default.id
+  cidr_block = "172.31.112.0/20"
+
+  tags = {
+    Name = "priv-subnet-02"
+  }
+}
+
+resource "aws_route_table_association" "priv_subnet_01" {
+  subnet_id      = aws_subnet.priv_subnet_01.id
+  route_table_id = aws_route_table.default_vpc_rt_for_priv_subnets.id
+}
+
+resource "aws_route_table_association" "priv_subnet_02" {
+  subnet_id      = aws_subnet.priv_subnet_02.id
+  route_table_id = aws_route_table.default_vpc_rt_for_priv_subnets.id
+}
+# -----------create fargate profile , during creation add namespace to fargate profile
+
+resource "aws_eks_fargate_profile" "default" {
+  cluster_name = aws_eks_cluster.game_2048.name
+  fargate_profile_name = "game-2048"
+  pod_execution_role_arn = aws_iam_role.AmazonEKSFargatePodExecutionRole.arn
+
+  subnet_ids = [aws_subnet.priv_subnet_01.id,aws_subnet.priv_subnet_02.id]
+
+  selector {
+    namespace = local.kubernetes_namespace
+  }
+
+  depends_on = [aws_eks_cluster.game_2048,aws_subnet.priv_subnet_01,aws_subnet.priv_subnet_02]
+}
+
+resource "aws_eks_fargate_profile" "kube_system" {
+  cluster_name = aws_eks_cluster.game_2048.name
+  fargate_profile_name = "kube-system"
+  pod_execution_role_arn = aws_iam_role.AmazonEKSFargatePodExecutionRole.arn
+
+  subnet_ids = [aws_subnet.priv_subnet_01.id,aws_subnet.priv_subnet_02.id]
+
+  selector {
+    namespace = "kube-system"
+  }
+
+  depends_on = [aws_eks_cluster.game_2048,aws_subnet.priv_subnet_01,aws_subnet.priv_subnet_02]
+}
+# ------------to enable logging for fargate pods
+#       create a iam policy with necessary permissions and attach it to fargate role 
+#       follow aws documentaion
+#       https://docs.aws.amazon.com/eks/latest/userguide/fargate-logging.html
+ data "http" "fargate_cloudwatch_policy" {
+  url = "https://raw.githubusercontent.com/aws-samples/amazon-eks-fluent-logging-examples/mainline/examples/fargate/cloudwatchlogs/permissions.json"
+}
+resource "aws_iam_policy" "fargate_cloudwatch_policy" {
+  name        = "fargate_cloudwatch_policy"
+  path        = "/"
+  description = "policy to allow components in fargate to do actions on cloudwatch"
+  policy = data.http.fargate_cloudwatch_policy.response_body
+}
+resource "aws_iam_role_policy_attachment" "fargate_cloudwatch_policy" {
+  policy_arn = aws_iam_policy.fargate_cloudwatch_policy.arn
+  role       = aws_iam_role.AmazonEKSFargatePodExecutionRole.name
+}
+
+# to provide internet access for resources in private subnets
+# EX:so pods in private subnet deployed on fargate can pull docker containers
+# Allocate an Elastic IP for the NAT Gateway
+resource "aws_eip" "nat_eip" {
+  tags = {
+    Name = "nat-eip"
+  }
+}
+
+resource "aws_nat_gateway" "nat_gw01" {
+  allocation_id = aws_eip.nat_eip.id
+  subnet_id     = local.first_subnet_id
+
+  tags = {
+    Name = "nat-gw01"
+  }
+  # To ensure proper ordering, it is recommended to add an explicit dependency
+  # on the Internet Gateway for the VPC.
+  depends_on = [ aws_eip.nat_eip, aws_subnet.priv_subnet_01 ]
+}
+
+

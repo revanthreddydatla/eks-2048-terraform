@@ -1,0 +1,35 @@
+aws_env.bat
+aws_env.ps1
+
+# Terraform state files and backups
+*.tfstate
+*.tfstate.*backup
+.terraform.tfstate.lock.info
+.terraform.lock.hcl
+
+# Terraform local directory
+.terraform/
+
+# Crash log files
+crash.log
+
+# Terraform override files
+override.tf
+override.tf.json
+*._override.tf
+*._override.tf.json
+
+# Variable files (especially those containing sensitive data)
+*.tfvars
+*.tfvars.json
+
+# Saved plan files
+*.tfplan
+
+# Terraform CLI configuration files
+.terraformrc
+terraform.rc
+
+# Provider-specific files (if applicable and not part of .terraform/)
+# For example, if a provider generates local cache files outside of .terraform/
+# provider_cache/
